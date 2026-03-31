@@ -13,7 +13,7 @@ import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from atq.quantizers import ternary_quantize, adaptive_threshold_magnitude
-from llm.quantize_model import quantize_model, get_model_size_mb, get_device
+from llm.quantize_model import quantize_model, get_model_size_mb, get_device, _is_linear_layer, _get_weight_for_linear
 from llm.evaluate import evaluate_perplexity, get_wikitext2_dataloader
 
 
@@ -21,16 +21,25 @@ def rtn_ternary_quantize(model: nn.Module, skip_patterns=("embed", "lm_head", "w
     """Apply naive round-to-nearest ternary quantization."""
     with torch.no_grad():
         for name, module in model.named_modules():
-            if isinstance(module, nn.Linear):
+            if _is_linear_layer(module):
                 if any(pat in name.lower() for pat in skip_patterns):
                     continue
-                w = module.weight.data
+                w = _get_weight_for_linear(module)
                 scale = w.abs().mean()
                 w_normalized = w / (scale + 1e-8)
                 w_ternary = torch.zeros_like(w)
                 w_ternary[w_normalized > 0.5] = 1.0
                 w_ternary[w_normalized < -0.5] = -1.0
-                module.weight.data = w_ternary * scale
+                w_result = w_ternary * scale
+                # Conv1D stores [in, out], _get_weight_for_linear returns [out, in]
+                try:
+                    from transformers.pytorch_utils import Conv1D as HFConv1D
+                    if isinstance(module, HFConv1D):
+                        module.weight.data = w_result.t()
+                        continue
+                except ImportError:
+                    pass
+                module.weight.data = w_result
     return model
 
 

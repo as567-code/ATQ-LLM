@@ -21,6 +21,38 @@ from atq.mixed_precision import (
     assign_precision,
 )
 
+# HuggingFace GPT-2 uses Conv1D instead of nn.Linear
+try:
+    from transformers.pytorch_utils import Conv1D as HFConv1D
+except ImportError:
+    HFConv1D = None
+
+
+def _is_linear_layer(module: nn.Module) -> bool:
+    """Check if module is a linear layer (nn.Linear or HF Conv1D)."""
+    if isinstance(module, nn.Linear):
+        return True
+    if HFConv1D is not None and isinstance(module, HFConv1D):
+        return True
+    return False
+
+
+def _get_linear_dims(module: nn.Module) -> tuple[int, int]:
+    """Get (in_features, out_features) from a linear layer.
+
+    HF Conv1D stores weight as [in, out], nn.Linear as [out, in].
+    """
+    if HFConv1D is not None and isinstance(module, HFConv1D):
+        return module.weight.shape[0], module.weight.shape[1]
+    return module.in_features, module.out_features
+
+
+def _get_weight_for_linear(module: nn.Module) -> torch.Tensor:
+    """Get weight in [out, in] format regardless of layer type."""
+    if HFConv1D is not None and isinstance(module, HFConv1D):
+        return module.weight.data.t()  # Conv1D stores [in, out]
+    return module.weight.data
+
 
 def get_device() -> torch.device:
     """Auto-detect best available device."""
@@ -65,29 +97,42 @@ def replace_linear_with_ternary(
     replacements = {}
 
     for name, module in model.named_modules():
-        if isinstance(module, nn.Linear):
+        if _is_linear_layer(module):
             if any(pat in name.lower() for pat in skip_patterns):
                 continue
             if precision_map and precision_map.get(name) == "fp16":
                 continue
 
+            in_feat, out_feat = _get_linear_dims(module)
             ternary_layer = TernaryLinear(
-                module.in_features,
-                module.out_features,
+                in_feat,
+                out_feat,
                 bias=module.bias is not None,
                 mode=mode,
                 alpha=alpha,
                 sparsity_target=sparsity_target,
             )
 
-            ternary_layer.weight.data.copy_(module.weight.data)
+            # Copy weights (Conv1D stores [in, out], we need [out, in])
+            w = _get_weight_for_linear(module)
+            ternary_layer.weight.data.copy_(w)
             if module.bias is not None:
                 ternary_layer.bias.data.copy_(module.bias.data)
 
+            # Initialize scale to correct magnitude for post-training quantization
+            # Scale = mean(|W|) for weights that will be non-zero after quantization
+            from atq.quantizers import compute_scale_factor, ternary_quantize as _tq
+            threshold = ternary_layer._compute_threshold()
+            w_q, scale = _tq(w, threshold)
+            ternary_layer.scale.data.fill_(scale)
+
             if thresholds and name in thresholds:
                 ternary_layer.alpha = thresholds[name] / max(
-                    module.weight.data.std().item(), 1e-8
+                    w.std().item(), 1e-8
                 )
+                # Recompute scale with calibrated threshold
+                w_q, scale = _tq(w, thresholds[name])
+                ternary_layer.scale.data.fill_(scale)
 
             replacements[name] = ternary_layer
 
@@ -139,7 +184,7 @@ def quantize_model(
         linear_layers = [
             (name, module)
             for name, module in model.named_modules()
-            if isinstance(module, nn.Linear)
+            if _is_linear_layer(module)
             and not any(
                 pat in name.lower()
                 for pat in ("embed", "lm_head", "wte", "wpe")
@@ -163,13 +208,16 @@ def quantize_model(
     quantized_size = get_model_size_mb(model)
     num_ternary_params = 0
     num_other_params = 0
+    counted_params = set()
     for name, module in model.named_modules():
         if isinstance(module, TernaryLinear):
             num_ternary_params += module.weight.numel()
-        elif isinstance(module, nn.Linear):
+            counted_params.add(id(module.weight))
+        elif _is_linear_layer(module):
             num_other_params += module.weight.numel()
+            counted_params.add(id(module.weight))
     for name, param in model.named_parameters():
-        if "weight" not in name and "bias" not in name:
+        if id(param) not in counted_params:
             num_other_params += param.numel()
 
     effective_bytes = (num_ternary_params * 2 / 8) + (num_other_params * 2)

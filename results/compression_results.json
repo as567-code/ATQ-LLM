@@ -1,0 +1,16 @@
+{
+  "fp32_perplexity": 35.70,
+  "fp32_size_mb": 474.70,
+  "rtn_perplexity": 1320411.61,
+  "rtn_effective_size_mb": 29.67,
+  "rtn_compression_ratio": 16.0,
+  "atq_perplexity": 110062.08,
+  "atq_effective_size_mb": 95.60,
+  "atq_compression_ratio": 5.0,
+  "atq_ternary_layers": 48,
+  "atq_vs_rtn_improvement": "12x lower perplexity",
+  "model": "gpt2",
+  "dataset": "wikitext-2-raw-v1",
+  "max_batches": 50,
+  "note": "Post-training quantization without QAT. ATQ adaptive thresholds yield 12x lower perplexity than naive RTN ternary."
+}
