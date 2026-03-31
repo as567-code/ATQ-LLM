@@ -12,6 +12,19 @@ from tqdm import tqdm
 
 from atq.quantizers import ternary_quantize
 
+try:
+    from transformers.pytorch_utils import Conv1D as HFConv1D
+except ImportError:
+    HFConv1D = None
+
+
+def _is_linear_layer(module: nn.Module) -> bool:
+    if isinstance(module, nn.Linear):
+        return True
+    if HFConv1D is not None and isinstance(module, HFConv1D):
+        return True
+    return False
+
 
 def _reconstruction_error(
     weight: Tensor, threshold: float, input_samples: Tensor
@@ -60,7 +73,7 @@ def calibrate_thresholds(
 
     linear_layers = {}
     for name, module in model.named_modules():
-        if isinstance(module, nn.Linear):
+        if _is_linear_layer(module):
             if any(pat in name.lower() for pat in skip_patterns):
                 continue
             linear_layers[name] = module

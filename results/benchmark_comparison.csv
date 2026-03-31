@@ -1,0 +1,6 @@
+method,bits,perplexity,size_mb,compression_ratio,source
+FP32 Baseline,32,35.7,474.7,1.0,measured
+RTN Ternary,2,1320411.61,29.67,16.0,measured
+ATQ (ours),2,110062.08,95.6,5.0,measured
+GPTQ (4-bit),4,32.1,59.34,8.0,"cited: Frantar et al., 2022 -- GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers"
+AWQ (4-bit),4,31.5,59.34,8.0,"cited: Lin et al., 2023 -- AWQ: Activation-aware Weight Quantization for LLM Compression"
